@@ -1,0 +1,258 @@
+// Prisma Schema for Multi-Tenant Shopify Data Ingestion
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== Authentication ====================
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  accounts      Account[]
+  sessions      Session[]
+  tenants       TenantUser[]
+  
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+  
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ==================== Multi-Tenancy ====================
+
+model Tenant {
+  id                  String       @id @default(cuid())
+  name                String
+  shopifyStoreDomain  String       @unique
+  shopifyAccessToken  String
+  shopifyApiKey       String?
+  shopifyApiSecret    String?
+  isActive            Boolean      @default(true)
+  lastSyncAt          DateTime?
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+  
+  users               TenantUser[]
+  customers           Customer[]
+  orders              Order[]
+  products            Product[]
+  webhookEvents       WebhookEvent[]
+  syncLogs            SyncLog[]
+  
+  @@map("tenants")
+}
+
+model TenantUser {
+  id        String   @id @default(cuid())
+  tenantId  String
+  userId    String
+  role      String   @default("viewer") // owner, admin, viewer
+  createdAt DateTime @default(now())
+  
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([tenantId, userId])
+  @@map("tenant_users")
+}
+
+// ==================== Shopify Data Models ====================
+
+model Customer {
+  id                 String    @id @default(cuid())
+  tenantId           String
+  shopifyCustomerId  String
+  email              String?
+  firstName          String?
+  lastName           String?
+  phone              String?
+  ordersCount        Int       @default(0)
+  totalSpent         Decimal   @default(0) @db.Decimal(10, 2)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  shopifyCreatedAt   DateTime?
+  shopifyUpdatedAt   DateTime?
+  tags               String[]
+  marketingOptIn     Boolean   @default(false)
+  
+  tenant             Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orders             Order[]
+  
+  @@unique([tenantId, shopifyCustomerId])
+  @@index([tenantId, email])
+  @@index([tenantId, totalSpent])
+  @@map("customers")
+}
+
+model Order {
+  id                String      @id @default(cuid())
+  tenantId          String
+  shopifyOrderId    String
+  orderNumber       String
+  customerId        String?
+  email             String?
+  totalPrice        Decimal     @db.Decimal(10, 2)
+  subtotalPrice     Decimal     @db.Decimal(10, 2)
+  totalTax          Decimal     @db.Decimal(10, 2)
+  currency          String      @default("USD")
+  financialStatus   String?     // paid, pending, refunded, etc.
+  fulfillmentStatus String?     // fulfilled, partial, unfulfilled
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  shopifyCreatedAt  DateTime
+  shopifyUpdatedAt  DateTime?
+  cancelledAt       DateTime?
+  tags              String[]
+  
+  tenant            Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer          Customer?   @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  lineItems         OrderLineItem[]
+  
+  @@unique([tenantId, shopifyOrderId])
+  @@index([tenantId, shopifyCreatedAt])
+  @@index([tenantId, customerId])
+  @@map("orders")
+}
+
+model OrderLineItem {
+  id              String   @id @default(cuid())
+  orderId         String
+  productId       String?
+  shopifyProductId String?
+  title           String
+  quantity        Int
+  price           Decimal  @db.Decimal(10, 2)
+  sku             String?
+  variantTitle    String?
+  
+  order           Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product         Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  
+  @@map("order_line_items")
+}
+
+model Product {
+  id               String    @id @default(cuid())
+  tenantId         String
+  shopifyProductId String
+  title            String
+  description      String?
+  vendor           String?
+  productType      String?
+  status           String    @default("active")
+  tags             String[]
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  shopifyCreatedAt DateTime?
+  shopifyUpdatedAt DateTime?
+  
+  tenant           Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  variants         ProductVariant[]
+  orderLineItems   OrderLineItem[]
+  
+  @@unique([tenantId, shopifyProductId])
+  @@index([tenantId, status])
+  @@map("products")
+}
+
+model ProductVariant {
+  id               String   @id @default(cuid())
+  productId        String
+  shopifyVariantId String
+  title            String
+  sku              String?
+  price            Decimal  @db.Decimal(10, 2)
+  compareAtPrice   Decimal? @db.Decimal(10, 2)
+  inventoryQuantity Int     @default(0)
+  
+  product          Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  
+  @@unique([productId, shopifyVariantId])
+  @@map("product_variants")
+}
+
+// ==================== Webhook & Sync Management ====================
+
+model WebhookEvent {
+  id          String   @id @default(cuid())
+  tenantId    String
+  topic       String   // customers/create, orders/create, etc.
+  shopifyId   String?
+  payload     Json
+  processed   Boolean  @default(false)
+  processedAt DateTime?
+  error       String?
+  createdAt   DateTime @default(now())
+  
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  @@index([tenantId, processed])
+  @@index([createdAt])
+  @@map("webhook_events")
+}
+
+model SyncLog {
+  id          String   @id @default(cuid())
+  tenantId    String
+  syncType    String   // full, incremental, webhook
+  entityType  String   // customers, orders, products
+  status      String   // running, completed, failed
+  recordsProcessed Int  @default(0)
+  recordsFailed    Int  @default(0)
+  error       String?
+  startedAt   DateTime @default(now())
+  completedAt DateTime?
+  
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  @@index([tenantId, startedAt])
+  @@map("sync_logs")
+}
